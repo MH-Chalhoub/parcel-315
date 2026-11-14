@@ -69,27 +69,68 @@ if(window.L){
  const contours=L.layerGroup(data.contours.flatMap(c=>[L.polyline(c.coords,{color:'#864c27',weight:1.5,interactive:false}),label(c.coords[Math.floor(c.coords.length/2)],c.z+' m','contour-label')]));
  for(const [id,layer] of Object.entries({roads,labels,contours}))el(id).onchange=e=>e.target.checked?layer.addTo(map):map.removeLayer(layer);
 }else mapNode.innerHTML='<p class="error">تعذّر تحميل مكتبة الخريطة. أعد تحميل الصفحة.</p>';
-const camera={eye:{x:1.33,y:-1.52,z:1.04},up:{x:0,y:0,z:1}};
-function buildTerrain(){
- const node=el('terrain');
- const app=window.Plotly;
- const colors=[[0,'#3d826c'],[.55,'#e3cd79'],[1,'#a45336']];
- const tri={type:'mesh3d',x:m.x,y:m.y,z:m.z,i:m.faces.map(f=>f[0]),j:m.faces.map(f=>f[1]),k:m.faces.map(f=>f[2]),intensity:m.z,colorscale:colors,cmin:low,cmax:high,hovertemplate:'%{z:.0f} m<extra></extra>',showscale:false,lighting:{ambient:.91,diffuse:.48,roughness:.95},name:'Surface'};
- const boundary={type:'scatter3d',mode:'lines',x:m.boundary.map(p=>p[0]),y:m.boundary.map(p=>p[1]),z:m.boundary.map(p=>p[2]+.35),line:{color:'#342c1c',width:5},hoverinfo:'skip',showlegend:false};
- const extremes={type:'scatter3d',mode:'markers+text',x:[m.x[m.low],m.x[m.high]],y:[m.y[m.low],m.y[m.high]],z:[low+.6,high+.6],text:[Math.round(low)+' m',Math.round(high)+' m'],textposition:'top center',marker:{color:['#1d6951','#9a3524'],size:5,line:{color:'#fff',width:1}},hoverinfo:'skip',showlegend:false};
- const aspect=z=>({x:1,y:1.03,z:(high-low+13)/131*z});
- const dim={showbackground:false,showticklabels:false,showspikes:false,showgrid:true,gridcolor:'#d6dddb',zeroline:false};
- return app.newPlot(node,[tri,boundary,extremes],{margin:{l:0,r:0,t:4,b:0},paper_bgcolor:'#fcfcfa',showlegend:false,scene:{xaxis:{...dim,title:'E →'},yaxis:{...dim,title:'N →'},zaxis:{...dim,title:'m',showticklabels:true,range:[low-7,high+6]},aspectmode:'manual',aspectratio:aspect(1),camera}},{responsive:true,displayModeBar:false}).then(()=>{
-  el('vertical').onchange=e=>app.relayout(node,{'scene.aspectratio':aspect(+e.target.value)});
-  el('reset').onclick=()=>app.relayout(node,{'scene.camera':camera});
- });
-}
 function terrain(){
- if(terrainReady){if(window.Plotly)Plotly.Plots.resize(el('terrain'));return}
- terrainReady=true;
- const script=document.createElement('script');script.src='https://cdn.plot.ly/plotly-gl3d-2.35.2.min.js';
- const fail=()=>{terrainReady=false;el('terrain').textContent='تعذّر تحميل العرض ثلاثي الأبعاد. جرّب إعادة فتح هذا القسم.'};
- script.onload=()=>buildTerrain().catch(fail);script.onerror=fail;document.head.append(script);
+ const node=el('terrain');
+ if(terrainReady){terrainReady();return}
+ const canvas=document.createElement('canvas');
+ canvas.style.cssText='width:100%;height:100%;display:block;touch-action:none;cursor:grab';
+ canvas.tabIndex=0;canvas.setAttribute('aria-label','نموذج ارتفاع قابل للتدوير بمفاتيح الأسهم');
+ node.replaceChildren(canvas);
+ const ctx=canvas.getContext('2d');
+ if(!ctx){node.textContent='تعذّر عرض نموذج التضاريس.';return}
+ let az=-.66, tilt=.63, start, rendered=[];
+ const mid=(high+low)/2, floor=low-10;
+ const scale=el('vertical');
+ function project(x,y,z,w,h){
+  const s=Math.min(w,h)/185, c=Math.cos(az),a=Math.sin(az);
+  const u=c*x-a*y,v=a*x+c*y;
+  const dz=(z-mid)*Number(scale.value);
+  return [w/2+u*s,h/2-(v*Math.sin(tilt)+dz*Math.cos(tilt))*s,v*Math.cos(tilt)-dz*Math.sin(tilt)];
+ }
+ function draw(){
+  if(!canvas.clientWidth)return;
+  const w=canvas.clientWidth,h=canvas.clientHeight,ratio=window.devicePixelRatio||1;
+  canvas.width=w*ratio;canvas.height=h*ratio;ctx.scale(ratio,ratio);
+  ctx.fillStyle='#fcfcfa';ctx.fillRect(0,0,w,h);
+  const p=(x,y,z)=>project(x,y,z,w,h);
+  const corners=m.x.map((x,i)=>p(x,m.y[i],m.z[i]));
+  const shapes=m.faces.map(f=>{
+   const value=f.reduce((a,i)=>a+m.z[i],0)/3;
+   const t=(value-low)/(high-low);
+   return {points:f.map(i=>corners[i]),fill:'hsl('+Math.round(157-140*t)+' 49% '+Math.round(42+21*Math.sin(t*Math.PI))+'%)',z:value, surface:true};
+  });
+  for(let i=1;i<m.boundary.length;i++){
+   const a=m.boundary[i-1],b=m.boundary[i];
+   shapes.push({points:[p(...a),p(...b),p(b[0],b[1],floor),p(a[0],a[1],floor)],fill:'#655a42'});
+  }
+  shapes.sort((a,b)=>b.points.reduce((s,p)=>s+p[2],0)/b.points.length-a.points.reduce((s,p)=>s+p[2],0)/a.points.length);
+  for(const shape of shapes){
+   ctx.beginPath();shape.points.forEach(([x,y],i)=>i?ctx.lineTo(x,y):ctx.moveTo(x,y));ctx.closePath();
+   ctx.fillStyle=shape.fill;ctx.fill();ctx.strokeStyle=shape.surface?shape.fill:'#7d6d51';ctx.lineWidth=.8;ctx.stroke();
+  }
+  rendered=shapes.filter(s=>s.surface);
+  ctx.beginPath();m.boundary.forEach((b,i)=>{const [x,y]=p(b[0],b[1],b[2]+.15);i?ctx.lineTo(x,y):ctx.moveTo(x,y)});ctx.strokeStyle='#fdf6df';ctx.lineWidth=1.5;ctx.stroke();
+  ctx.font='bold 14px Arial';ctx.textAlign='center';
+  for(const i of [m.low,m.high]){
+   const [x,y]=corners[i];ctx.beginPath();ctx.arc(x,y,4,0,Math.PI*2);ctx.fillStyle='#20353c';ctx.fill();
+   ctx.lineWidth=4;ctx.strokeStyle='#fcfcfa';ctx.strokeText(Math.round(m.z[i])+' m',x,y-9);
+   ctx.fillStyle='#24333a';ctx.fillText(Math.round(m.z[i])+' m',x,y-9);
+  }
+ }
+ const probe=document.createElement('span');node.parentElement.querySelector('.caption').append(' ',probe);
+ canvas.onpointerdown=e=>{canvas.setPointerCapture(e.pointerId);start=[e.clientX,e.clientY];canvas.style.cursor='grabbing'};
+ canvas.onpointermove=e=>{
+  if(start){az+=(e.clientX-start[0])*.012;tilt=Math.max(.26,Math.min(1.32,tilt+(e.clientY-start[1])*.009));start=[e.clientX,e.clientY];draw();return}
+  const box=canvas.getBoundingClientRect(),x=e.clientX-box.left,y=e.clientY-box.top;
+  const orient=(p,q)=>(x-q[0])*(p[1]-q[1])-(p[0]-q[0])*(y-q[1]);
+  const hit=rendered.findLast(({points:[a,b,c]})=>{const g=[orient(a,b),orient(b,c),orient(c,a)];return g.every(v=>v>=0)||g.every(v=>v<=0)});
+  probe.textContent=hit?' · '+meters(hit.z):'';
+ };
+ canvas.onlostpointercapture=()=>{start=null;canvas.style.cursor='grab'};
+ canvas.onkeydown=e=>{if(e.key==='ArrowLeft')az-=.12;else if(e.key==='ArrowRight')az+=.12;else if(e.key==='ArrowUp')tilt=Math.min(1.32,tilt+.08);else if(e.key==='ArrowDown')tilt=Math.max(.26,tilt-.08);else return;e.preventDefault();draw()};
+ scale.onchange=draw;el('reset').onclick=()=>{az=-.66;tilt=.63;draw()};
+ new ResizeObserver(draw).observe(node);
+ terrainReady=draw;draw();
 }
 const tabs=[...document.querySelectorAll('[role=tab]')];
 function select(tab,focus=false){
